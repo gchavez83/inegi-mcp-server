@@ -87,15 +87,15 @@ async def obtener_serie_temporal(
             if "OBSERVATIONS" in serie:
                 obs = serie["OBSERVATIONS"]
                 texto += f"**Datos ({len(obs)} observaciones):**\n\n"
-                
-                ultimas = obs[-10:] if len(obs) > 10 else obs
+                LIMITE = 80
+                ultimas = obs[-LIMITE:] if len(obs) > LIMITE else obs
                 for o in ultimas:
                     periodo = o.get("TIME_PERIOD", "N/A")
                     valor = o.get("OBS_VALUE", "N/A")
                     texto += f"- {periodo}: {valor}\n"
                 
-                if len(obs) > 10:
-                    texto += f"\n_(Mostrando las últimas 10 de {len(obs)} observaciones)_"
+                if len(obs) > LIMITE:
+                    texto += f"\n_(Mostrando las últimas {LIMITE} de {len(obs)} observaciones)_"
             
             return texto
         else:

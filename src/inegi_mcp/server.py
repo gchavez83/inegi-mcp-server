@@ -22,29 +22,68 @@ denue_client = DENUEClient()
 async def buscar_indicadores(query: str) -> str:
     """
     Busca indicadores del INEGI por palabra clave.
-    Útil para encontrar el ID de indicadores disponibles.
-    
+
+    Estrategia de 3 niveles (rápido → completo):
+    1. Catálogo local curado (~50 indicadores validados con sus IDs).
+    2. CL_INDICATOR BISE — catálogo oficial de indicadores sociodemográficos.
+    3. CL_INDICATOR BIE  — catálogo oficial de indicadores económicos.
+
+    Siempre devuelve el ID listo para usar en obtener_serie_temporal.
+
     Args:
-        query: Término de búsqueda (ej: 'población', 'PIB', 'empleo')
+        query: Término en español (ej: 'divorcios', 'fecundidad', 'pobreza', 'homicidios')
     """
     query_lower = query.lower()
-    resultados = []
-    
-    for indicador_id, nombre in INDICADORES_COMUNES.items():
-        if query_lower in nombre.lower():
-            resultados.append(f"- **{nombre}** (ID: `{indicador_id}`)")
-    
-    if resultados:
-        texto = "## Indicadores encontrados:\n\n"
-        texto += "\n".join(resultados)
-        texto += "\n\n💡 Usa el ID para obtener los datos con `obtener_serie_temporal`"
+
+    # ── Nivel 1: Catálogo local curado ─────────────────────────────────────────
+    resultados_locales = [
+        (iid, nombre)
+        for iid, nombre in INDICADORES_COMUNES.items()
+        if query_lower in nombre.lower()
+    ]
+    if resultados_locales:
+        texto = "## Indicadores para '{}' (catálogo local)\n\n".format(query)
+        for iid, nombre in resultados_locales:
+            texto += "- **{}**  ->  ID: `{}`\n".format(nombre, iid)
+        texto += "\n💡 Usa el ID en `obtener_serie_temporal`."
         return texto
-    else:
-        texto = f"No se encontraron indicadores con el término '{query}'.\n\n"
-        texto += "**Indicadores disponibles:**\n"
-        for indicador_id, nombre in INDICADORES_COMUNES.items():
-            texto += f"- {nombre} (ID: `{indicador_id}`)\n"
+
+    # ── Nivel 2 y 3: CL_INDICATOR oficial (BISE y BIE) ─────────────────────────
+    resultados_api = []
+    errores = []
+
+    for banco in ("BISE", "BIE"):
+        try:
+            res = await indicadores_client.buscar_por_cl_indicator(
+                query=query, banco=banco
+            )
+            resultados_api.extend(res)
+        except Exception as e:
+            errores.append("{}: {}".format(banco, str(e)[:60]))
+
+    if resultados_api:
+        texto = "## Indicadores para '{}' (catálogo INEGI)\n\n".format(query)
+        texto += "Se encontraron **{}** coincidencias:\n\n".format(len(resultados_api))
+        for r in resultados_api[:30]:
+            texto += "- **{}** [{}]  ->  ID: `{}`\n".format(
+                r["nombre"], r["banco"], r["id"]
+            )
+        if len(resultados_api) > 30:
+            texto += "\n_...y {} más. Usa `buscar_catalogo_cl` con más detalle._\n".format(
+                len(resultados_api) - 30
+            )
+        texto += "\n💡 Copia el ID y úsalo en `obtener_serie_temporal`."
         return texto
+
+    # Sin resultados en ningún nivel
+    texto = "No se encontraron indicadores para '{}'.\n\n".format(query)
+    if errores:
+        texto += "_(Errores en API: {})_\n\n".format(", ".join(errores))
+    texto += "**Sugerencias:**\n"
+    texto += "- Prueba sinónimos (ej: 'nupcialidad' en lugar de 'matrimonios')\n"
+    texto += "- Usa `buscar_catalogo_cl` para búsqueda avanzada por banco\n"
+    texto += "- Consulta https://www.inegi.org.mx/app/indicadores/ y copia el ID\n"
+    return texto
 
 
 @mcp.tool()
@@ -87,15 +126,15 @@ async def obtener_serie_temporal(
             if "OBSERVATIONS" in serie:
                 obs = serie["OBSERVATIONS"]
                 texto += f"**Datos ({len(obs)} observaciones):**\n\n"
-                
-                ultimas = obs[-10:] if len(obs) > 10 else obs
+                LIMITE = 80
+                ultimas = obs[-LIMITE:] if len(obs) > LIMITE else obs
                 for o in ultimas:
                     periodo = o.get("TIME_PERIOD", "N/A")
                     valor = o.get("OBS_VALUE", "N/A")
                     texto += f"- {periodo}: {valor}\n"
                 
-                if len(obs) > 10:
-                    texto += f"\n_(Mostrando las últimas 10 de {len(obs)} observaciones)_"
+                if len(obs) > LIMITE:
+                    texto += f"\n_(Mostrando las últimas {LIMITE} de {len(obs)} observaciones)_"
             
             return texto
         else:
@@ -103,6 +142,77 @@ async def obtener_serie_temporal(
             
     except Exception as e:
         return f"Error al obtener el indicador: {str(e)}"
+
+
+@mcp.tool()
+async def buscar_catalogo_cl(
+    query: str,
+    banco: str = "BISE",
+    limite: int = 30
+) -> str:
+    """
+    Búsqueda directa en el catálogo oficial CL_INDICATOR del INEGI.
+    Tiene acceso a MILES de indicadores — mucho más completo que buscar_indicadores().
+
+    Úsala cuando:
+    - buscar_indicadores() no encuentra el indicador
+    - Quieras explorar todos los indicadores de un tema específico
+    - Necesites comparar variantes de un mismo indicador
+
+    Args:
+        query: Término de búsqueda (ej: 'fecundidad', 'exportaciones', 'pobreza')
+        banco: "BISE" = indicadores sociodemográficos (educación, salud, demografía)
+               "BIE"  = indicadores económicos (PIB, comercio, industria, precios)
+        limite: Máximo de resultados a mostrar (default: 30, máx recomendado: 100)
+    """
+    try:
+        resultados = await indicadores_client.buscar_por_cl_indicator(
+            query=query,
+            banco=banco
+        )
+
+        if not resultados:
+            # Intentar con el otro banco automáticamente
+            otro_banco = "BIE" if banco == "BISE" else "BISE"
+            resultados_alt = await indicadores_client.buscar_por_cl_indicator(
+                query=query,
+                banco=otro_banco
+            )
+            if resultados_alt:
+                texto = "No se encontró en **{}**, pero hay {} resultados en **{}**:\n\n".format(
+                    banco, len(resultados_alt), otro_banco
+                )
+                banco = otro_banco
+                resultados = resultados_alt
+            else:
+                return (
+                    "No se encontraron indicadores para '{}' en ningún banco (BISE/BIE).\n"
+                    "Intenta con sinónimos o consulta https://www.inegi.org.mx/app/indicadores/".format(query)
+                )
+        else:
+            texto = ""
+
+        total = len(resultados)
+        mostrar = min(total, limite)
+
+        texto += "## Catálogo CL_INDICATOR — '{}' en {}\n\n".format(query, banco)
+        texto += "**Total encontrados:** {}  |  **Mostrando:** {}\n\n".format(total, mostrar)
+
+        for r in resultados[:limite]:
+            texto += "- **{}**  ->  `{}`\n".format(r["nombre"], r["id"])
+
+        if total > limite:
+            texto += "\n_...y {} más. Aumenta `limite` para ver más._\n".format(total - limite)
+
+        texto += "\n💡 Usa el ID en `obtener_serie_temporal` o `comparar_estados`."
+        return texto
+
+    except Exception as e:
+        return (
+            "Error al consultar CL_INDICATOR: {}\n\n"
+            "Asegúrate de que INEGI_INDICADORES_TOKEN sea válido en tu .env".format(str(e))
+        )
+
 
 
 @mcp.tool()

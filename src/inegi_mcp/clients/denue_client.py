@@ -19,8 +19,7 @@ class DENUEClient:
         self.base_url = DENUE_BASE_URL
         self.config = DENUEConfig()
         
-        if not self.token:
-            raise ValueError("Se requiere un token del INEGI para DENUE. Configura INEGI_DENUE_TOKEN en las variables de entorno.")
+        # Token se valida en cada llamada — llega como env var del proceso de Claude Desktop
     
     async def buscar_establecimientos(
         self,

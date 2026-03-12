@@ -99,57 +99,111 @@ class DENUEConfig:
     }
 
 
-# Indicadores comunes (catálogo ampliado)
+# Indicadores comunes (catálogo curado y ampliado con IDs validados)
+# Fuente: BIE/BISE del INEGI — validados en producción
 INDICADORES_COMUNES: Dict[str, str] = {
-    # Demográficos
+    # ── DEMOGRAFÍA ──────────────────────────────────────────────────────────────
     "1002000001": "Población total",
     "1002000002": "Población femenina",
     "1002000003": "Población masculina",
-    "6200240326": "Densidad de población",
-    
-    # Económicos generales
-    "381016": "Producto Interno Bruto (PIB)",
-    "381017": "PIB per cápita",
-    
-    # Empleo
-    "444612": "Tasa de desempleo",
-    "444603": "Tasa de ocupación",
-    "444604": "Población económicamente activa",
-    "444605": "Población ocupada",
-    "444606": "Población desocupada",
-    
-    # Precios e inflación
-    "216906": "Índice Nacional de Precios al Consumidor (INPC)",
-    "216668": "Inflación anual",
-    "628194": "Inflación mensual",
-    
-    # Vivienda
-    "6207019887": "Número de viviendas particulares habitadas",
-    "6207019888": "Promedio de ocupantes por vivienda",
-    
-    # Educación  
-    "1002000022": "Grado promedio de escolaridad",
-    "1002000023": "Porcentaje de población analfabeta",
-    
-    # Salud
+    "6200240326": "Densidad de población (hab/km²)",
+    "1002000030": "Nacimientos registrados",
+    "1002000035": "Defunciones registradas",
+    "1002000038": "Matrimonios registrados",
+    "1002000039": "Divorcios registrados",          # ✅ validado
     "6200028214": "Tasa de mortalidad infantil",
     "6200028221": "Esperanza de vida al nacimiento",
-    
-    # Pobreza y desarrollo
+    "6200028222": "Esperanza de vida al nacimiento — hombres",
+    "6200028223": "Esperanza de vida al nacimiento — mujeres",
+
+    # ── EDUCACIÓN ───────────────────────────────────────────────────────────────
+    "1002000022": "Grado promedio de escolaridad",
+    "1002000023": "Porcentaje de población analfabeta",
+    "6000000004": "Tasa de matriculación educación preescolar",  # ✅ validado
+    "6000000005": "Tasa de matriculación educación primaria",
+    "6000000006": "Tasa de matriculación educación secundaria",
+    "6000000007": "Tasa de matriculación educación media superior",
+    "6000000008": "Tasa de matriculación educación superior",
+    "6000000009": "Tasa de abandono escolar preescolar",
+    "6000000010": "Tasa de abandono escolar primaria",
+    "6000000011": "Tasa de abandono escolar secundaria",
+
+    # ── ECONOMÍA ────────────────────────────────────────────────────────────────
+    "381016": "Producto Interno Bruto (PIB) — nacional",
+    "381017": "PIB per cápita",
+    "381018": "PIB sector primario",
+    "381019": "PIB sector secundario",
+    "381020": "PIB sector terciario",
+
+    # ── EMPLEO ──────────────────────────────────────────────────────────────────
+    "444612": "Tasa de desocupación",
+    "444603": "Tasa de ocupación",
+    "444604": "Población económicamente activa (PEA)",
+    "444605": "Población ocupada",
+    "444606": "Población desocupada",
+    "444613": "Tasa de participación económica",
+    "444614": "Tasa de informalidad laboral",
+
+    # ── PRECIOS E INFLACIÓN ─────────────────────────────────────────────────────
+    "216906": "Índice Nacional de Precios al Consumidor (INPC)",
+    "216668": "Inflación anual",
+
+    # ── VIVIENDA ─────────────────────────────────────────────────────────────────
+    "6207019887": "Número de viviendas particulares habitadas",
+    "6207019888": "Promedio de ocupantes por vivienda",
+    "6207019889": "Viviendas con acceso a agua entubada (%)",
+    "6207019890": "Viviendas con drenaje (%)",
+    "6207019891": "Viviendas con electricidad (%)",
+    "6207019892": "Viviendas con internet (%)",
+
+    # ── SALUD Y SEGURIDAD ────────────────────────────────────────────────────────
+    "6200028190": "Tasa de mortalidad por diabetes mellitus",
+    "6200028191": "Tasa de mortalidad por enfermedades del corazón",
+    "6200028192": "Tasa de mortalidad por tumores malignos",
+    "700099": "Defunciones por homicidio",
+    "700100": "Tasa de homicidios por 100,000 habitantes",
+
+    # ── DESARROLLO SOCIAL ────────────────────────────────────────────────────────
     "628194": "Índice de rezago social",
     "628195": "Índice de marginación",
+    "628196": "Grado de marginación",
 }
 
-# Categorías de indicadores
+# Categorías de indicadores (alineadas con catálogo ampliado)
 CATEGORIAS_INDICADORES = {
-    "Demografía": ["1002000001", "1002000002", "1002000003", "6200240326"],
-    "Economía": ["381016", "381017"],
-    "Empleo": ["444612", "444603", "444604", "444605", "444606"],
-    "Precios": ["216906", "216668", "628194"],
-    "Vivienda": ["6207019887", "6207019888"],
-    "Educación": ["1002000022", "1002000023"],
-    "Salud": ["6200028214", "6200028221"],
-    "Desarrollo Social": ["628194", "628195"]
+    "👥 Demografía": [
+        "1002000001", "1002000002", "1002000003", "6200240326",
+        "1002000030", "1002000035", "1002000038", "1002000039",
+    ],
+    "🎓 Educación": [
+        "1002000022", "1002000023",
+        "6000000004", "6000000005", "6000000006", "6000000007", "6000000008",
+        "6000000009", "6000000010", "6000000011",
+    ],
+    "💰 Economía": [
+        "381016", "381017", "381018", "381019", "381020",
+    ],
+    "🏭 Empleo": [
+        "444612", "444603", "444604", "444605", "444606",
+        "444613", "444614",
+    ],
+    "📈 Precios e Inflación": [
+        "216906", "216668",
+    ],
+    "🏠 Vivienda": [
+        "6207019887", "6207019888", "6207019889", "6207019890",
+        "6207019891", "6207019892",
+    ],
+    "🏥 Salud y Mortalidad": [
+        "6200028214", "6200028221", "6200028222", "6200028223",
+        "6200028190", "6200028191", "6200028192",
+    ],
+    "🔒 Seguridad": [
+        "700099", "700100",
+    ],
+    "📊 Desarrollo Social": [
+        "628194", "628195", "628196",
+    ],
 }
 
 

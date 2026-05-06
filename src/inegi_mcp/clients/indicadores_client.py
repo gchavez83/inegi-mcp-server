@@ -53,7 +53,7 @@ class IndicadoresClient:
 
         # Reintento BISE → BIE
         last_error = None
-        for fuente in ("BISE", "BIE-BISE", "BIE"):
+        for fuente in ("BIE", "BISE", "BIE-BISE"):
             url = self._construir_url(
                 metodo="INDICATOR", indicador_id=indicador_id,
                 idioma=idioma, area_geo=geo_final,

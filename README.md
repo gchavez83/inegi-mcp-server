@@ -31,6 +31,8 @@ Este servidor MCP proporciona acceso completo y optimizado a las APIs oficiales 
 ### 🌟 Características Principales
 
 - ✅ **Acceso completo al catálogo INEGI** - Miles de indicadores económicos y demográficos
+- ✅ **Búsqueda semántica en el Banco de Indicadores (BIE)** - Mismo endpoint que el portal web del INEGI
+- ✅ **Detección automática de nivel geográfico** - Nacional, estatal o municipal según disponibilidad
 - ✅ **Base de datos DENUE** - Más de 5 millones de establecimientos económicos
 - ✅ **Búsquedas geográficas avanzadas** - Por coordenadas, estados, municipios
 - ✅ **Análisis comparativos** - Entre estados y regiones
@@ -44,18 +46,18 @@ Este servidor MCP proporciona acceso completo y optimizado a las APIs oficiales 
 ### Esquema de Funcionamiento
 
 ```
-┌─────────────────┐    ┌───────────────────┐    ┌─────────────────┐
-│                 │    │                   │    │                 │
-│  Claude Desktop │◄──►│   MCP Server      │◄──►│   APIs INEGI    │
-│                 │    │   (inegi_mcp)     │    │                 │
-└─────────────────┘    └───────────────────┘    └─────────────────┘
-         ▲                         │                       │
-         │                         ▼                       ▼
-    ┌─────────┐            ┌──────────────┐      ┌─────────────────┐
-    │  User   │            │   Tools      │      │ • Indicadores   │
-    │ Request │            │ & Clients    │      │ • DENUE         │
-    └─────────┘            └──────────────┘      │ • Geoestadística│
-                                   │              └─────────────────┘
+┌─────────────────┐    ┌───────────────────┐    ┌──────────────────────┐
+│                 │    │                   │    │                      │
+│  Claude Desktop │◄──►│   MCP Server      │◄──►│   APIs INEGI         │
+│                 │    │   (inegi_mcp)     │    │                      │
+└─────────────────┘    └───────────────────┘    └──────────────────────┘
+         ▲                         │                         │
+         │                         ▼                         ▼
+    ┌─────────┐            ┌──────────────┐      ┌───────────────────────┐
+    │  User   │            │   Tools      │      │ • Indicadores (BISE)  │
+    │ Request │            │ & Clients    │      │ • BIE (buscadorcore)  │
+    └─────────┘            └──────────────┘      │ • DENUE               │
+                                   │              └───────────────────────┘
                                    ▼
                            ┌──────────────┐
                            │ Structured   │
@@ -66,12 +68,8 @@ Este servidor MCP proporciona acceso completo y optimizado a las APIs oficiales 
 ### Componentes Principales
 
 #### 🔧 **Clients** (`src/inegi_mcp/clients/`)
-- **`indicadores_client.py`** - Cliente para API de Indicadores Económicos
+- **`indicadores_client.py`** - Cliente para API de Indicadores Económicos y búsqueda BIE
 - **`denue_client.py`** - Cliente para API del DENUE
-
-#### 🛠️ **Tools** (`src/inegi_mcp/tools/`)
-- **`indicadores_tools.py`** - Herramientas para datos estadísticos
-- **`denue_tools.py`** - Herramientas para establecimientos económicos
 
 #### ⚙️ **Server** (`src/inegi_mcp/server.py`)
 - Coordinador principal que registra todas las herramientas
@@ -82,8 +80,10 @@ Este servidor MCP proporciona acceso completo y optimizado a las APIs oficiales 
 ## ✨ Funcionalidades
 
 ### 📊 **Indicadores Económicos y Demográficos**
-- Búsqueda en catálogo básico (~30 indicadores principales)
-- **🆕 Búsqueda en catálogo completo** - Miles de indicadores disponibles
+- Búsqueda en catálogo básico (~60 indicadores principales validados)
+- **Búsqueda en catálogo completo** - Miles de indicadores disponibles
+- **🆕 Búsqueda semántica en el Banco de Indicadores (BIE)** - PIB, IGAE, exportaciones, etc.
+- **🆕 Obtención inteligente de indicadores** - Detecta nivel geográfico automáticamente y hace fallback nacional
 - Series temporales históricas completas
 - Comparaciones entre estados de México
 - Datos a nivel nacional, estatal y municipal
@@ -105,6 +105,12 @@ Este servidor MCP proporciona acceso completo y optimizado a las APIs oficiales 
 - **Cobertura:** Nacional, Estatal, Municipal
 - **Datos:** PIB, población, empleo, inflación, etc.
 - **Periodicidad:** Anual, trimestral, mensual
+
+### 🔍 API Buscador BIE
+**Base:** `https://www.inegi.org.mx/app/api/buscadorcore/v1/busquedaBancoIndicadores/`
+- **Tipo:** POST con búsqueda semántica por ranking
+- **Cobertura:** Banco de Indicadores Económicos completo (BIE)
+- **Retorna:** ID, título, unidad, frecuencia, períodos disponibles y nivel geográfico
 
 ### 🏢 API DENUE
 **Base:** `https://www.inegi.org.mx/app/api/denue/`
@@ -180,7 +186,9 @@ Una vez configurado, puedes hacer consultas directas a Claude Desktop:
 
 ### 💬 Ejemplos de Consultas
 ```
-"Claude, ¿cuál es el PIB actual de Yucatán?"
+"Claude, ¿cuál es el PIB actual de México?"
+
+"Busca indicadores del IGAE en el Banco de Indicadores"
 
 "Compara la población entre Yucatán, Nuevo León y CDMX"
 
@@ -188,20 +196,47 @@ Una vez configurado, puedes hacer consultas directas a Claude Desktop:
 
 "¿Cuántos restaurantes hay en el centro de Mérida?"
 
-"Dame la serie histórica de inflación en México"
+"Dame la serie histórica de exportaciones en México"
+
+"Obtén los datos del indicador 510104 para Yucatán"
 ```
 
 ---
 
 ## 📖 Ejemplos Prácticos
 
-### 📊 **Análisis Económico**
+### 📊 **Análisis Económico — Flujo recomendado con BIE**
 ```python
-# Obtener PIB de México (serie temporal)
-obtener_serie_temporal(indicador_id="381016", historica=True)
+# 1. Buscar indicadores de PIB en el Banco de Indicadores
+buscar_banco_indicadores(busqueda="PIB")
+# → Retorna lista con IDs reales: 510104, 524388, 527794, etc.
 
-# Comparar PIB entre estados
-comparar_estados(indicador_id="381016", estados=["31", "19", "09"])
+# 2. Obtener la serie del indicador encontrado (con detección geográfica automática)
+obtener_indicador_inteligente(indicador_id="510104", codigo_geo="31")
+# → Detecta nivel nacional (desglose=1), retorna serie completa
+
+# 3. Para indicadores con cobertura estatal, intenta Yucatán automáticamente
+obtener_indicador_inteligente(indicador_id="6207061369", codigo_geo="31")
+# → Si hay datos estatales los trae; si no, hace fallback a nacional
+```
+
+### 📈 **Búsqueda de indicadores de precios / INPC**
+```python
+# El BIE no reconoce 'inflacion' directamente — usar el término correcto
+buscar_banco_indicadores(busqueda="precios consumidor")
+# → Retorna UMA Diario/Mensual/Anual base INPC (IDs 539260-539262)
+
+buscar_banco_indicadores(busqueda="indice precios")
+# → Mismos resultados
+```
+
+### 📊 **Análisis Económico — Catálogo básico**
+```python
+# Obtener PIB de México (serie temporal con IDs del catálogo básico)
+obtener_serie_temporal(indicador_id="510104", historica=True)
+
+# Comparar tasa de desocupación entre estados
+comparar_estados(indicador_id="444612", estados=["31", "19", "09"])
 ```
 
 ### 🏪 **Análisis de Mercado**
@@ -227,20 +262,60 @@ obtener_coordenadas_establecimientos(termino="restaurantes", limite=10)
 
 | Función | Descripción | Casos de Uso |
 |---------|-------------|--------------|
-| `buscar_indicadores` | Busca indicadores en catálogo básico | Búsquedas rápidas de indicadores comunes |
-| `buscar_catalogo_completo` | 🆕 Busca en catálogo completo (miles) | Análisis detallados, investigación específica |
-| `obtener_serie_temporal` | Obtiene datos históricos | Análisis de tendencias, proyecciones |
-| `comparar_estados` | Compara indicador entre estados | Estudios regionales, benchmarking |
-| `listar_indicadores_disponibles` | Lista indicadores del catálogo básico | Exploración inicial, referencia rápida |
+| `buscar_indicadores` | Busca en catálogo local curado (~60 IDs) | Indicadores comunes validados |
+| `buscar_catalogo_cl` | Búsqueda en CL_INDICATOR oficial (BISE/BIE) | Exploración por banco de datos |
+| `buscar_catalogo_completo` | Busca en catálogo completo vía buscadorcore | Análisis detallados, investigación |
+| `buscar_banco_indicadores` | 🆕 Búsqueda semántica directa en BIE (mismo endpoint que el portal INEGI) | **PIB, IGAE, exportaciones, balanza** |
+| `obtener_serie_temporal` | Obtiene datos históricos por ID | Análisis de tendencias, proyecciones |
+| `obtener_indicador_inteligente` | 🆕 Obtención con detección automática de nivel geográfico y fallback | **Uso general recomendado** |
+| `comparar_estados` | Compara un indicador entre varios estados | Estudios regionales, benchmarking |
+| `listar_indicadores_disponibles` | Lista el catálogo básico completo | Exploración inicial, referencia rápida |
+
+> **💡 Flujo recomendado:** `buscar_banco_indicadores` → obtener ID → `obtener_indicador_inteligente`
 
 ### 🏢 **Herramientas de Establecimientos**
 
 | Función | Descripción | Casos de Uso |
 |---------|-------------|--------------|
-| `buscar_establecimientos` | Búsqueda básica por término | Consultas generales |
-| `buscar_area_act` | 🆕 Búsqueda avanzada con metadatos | Análisis detallados, estudios de mercado |
+| `buscar_establecimientos` | Búsqueda básica por término y radio | Consultas generales |
+| `buscar_area_act` | Búsqueda avanzada con AGEB y Manzana | Análisis detallados, estudios de mercado |
 | `cuantificar_establecimientos` | Estadísticas por sector/región | Análisis cuantitativos, estudios sectoriales |
 | `obtener_coordenadas_establecimientos` | Ubicaciones geográficas precisas | Mapeo, análisis espacial |
+
+---
+
+## 🗺️ Términos Validados en el BIE
+
+El endpoint de búsqueda del Banco de Indicadores (BIE) usa indexación por título exacto. Los siguientes términos han sido validados y devuelven resultados:
+
+| Categoría | Términos que funcionan | Términos que NO funcionan |
+|-----------|----------------------|--------------------------|
+| PIB | `PIB`, `producto interno`, `interno bruto` | ~~`pib nacional`~~ |
+| Actividad | `IGAE`, `igae`, `actividad economica`, `crecimiento` | — |
+| Precios | `precios consumidor`, `indice precios` | ~~`inflacion`~~, ~~`INPC`~~ |
+| Comercio | `exportaciones`, `balanza`, `industria` | — |
+| Empleo | `ocupacion`, `salario` | ~~`desempleo`~~ |
+
+---
+
+## 🔑 Indicadores Clave Validados
+
+| Indicador | ID | Descripción |
+|-----------|----|-----------| 
+| PIB total nacional | `510104` | Millones de pesos corrientes, trimestral 1993-2023 |
+| PIB a precios básicos | `524388` | Cuentas nacionales |
+| IGAE — Variación anual | `491656` | Indicador Global Actividad Económica |
+| IGAE — Con petróleo | `491659` | Serie mensual |
+| IGAE — Sin petróleo | `491660` | Serie mensual |
+| UMA Diario (base INPC) | `539260` | Anual 2015-2026 |
+| UMA Mensual (base INPC) | `539261` | Anual 2015-2026 |
+| Tasa de desocupación | `444612` | Mensual, nacional |
+| Exportaciones anuales | `6207095719` | Por entidad federativa |
+| Balanza Comercial | `6204198565` | Mercancías de México |
+| ITAEE Yucatán | `6207061369` | Actividad económica estatal |
+| Población total | `1002000001` | Por entidad federativa |
+| Nacimientos | `1002000030` | Registros vitales |
+| Matrimonios | `1002000038` | Registros vitales |
 
 ---
 
@@ -287,15 +362,6 @@ Para implementación en producción con Azure y manejo seguro de variables de en
 - [Banco de Indicadores INEGI](https://www.inegi.org.mx/app/indicadores/)
 - [Model Context Protocol](https://modelcontextprotocol.io)
 
-### 🔍 **Indicadores Comunes**
-| Indicador | ID | Descripción |
-|-----------|----|-----------| 
-| Población total | `1002000001` | Población total por entidad |
-| PIB | `381016` | Producto Interno Bruto |
-| Tasa de desempleo | `444612` | Porcentaje de desempleo |
-| INPC | `216906` | Índice Nacional de Precios al Consumidor |
-| Inflación anual | `216668` | Tasa de inflación anualizada |
-
 ---
 
 ## 🔒 Seguridad
@@ -316,11 +382,6 @@ Para implementación en producción con Azure y manejo seguro de variables de en
 - Consulta la [documentación oficial del INEGI](https://www.inegi.org.mx/servicios/api.html)
 - Revisa la [guía de deployment en Azure](AZURE_DEPLOYMENT.md)
 
-### 💬 **¿Necesitas ayuda?**
-- Describe tu problema con el máximo detalle posible
-- Incluye mensajes de error completos
-- Menciona tu sistema operativo y versión de Python
-
 ---
 
 ## 📄 Licencia
@@ -337,20 +398,19 @@ Este es un proyecto independiente y **no está oficialmente afiliado con el INEG
 
 ## 🎯 Roadmap
 
-### 🚀 **Próximas Funcionalidades**
-- [ ] Caché inteligente para optimizar consultas
-- [ ] Exportación a diferentes formatos (Excel, CSV, JSON)
-- [ ] Visualizaciones automáticas de datos
-- [ ] Integración con más APIs gubernamentales mexicanas
-- [ ] Dashboard web interactivo
-- [ ] API REST complementaria
+### ✅ **Completado**
+- [x] Búsqueda semántica en Banco de Indicadores BIE (`buscar_banco_indicadores`)
+- [x] Obtención inteligente con detección geográfica automática (`obtener_indicador_inteligente`)
+- [x] Catálogo de IDs validados via `diagnostico_bie2.py`
+- [x] Fix `metodoBusqueda=1` y `orderby=RANKING` en cliente BIE
+- [x] Tabla de sinónimos documentada (términos que el BIE reconoce vs. no reconoce)
 
-### 🔧 **Mejoras Técnicas**
-- [ ] Tests automatizados
-- [ ] CI/CD pipeline
-- [ ] Documentación interactiva (OpenAPI)
-- [ ] Monitoring y logging avanzado
-- [ ] Rate limiting inteligente
+### 🚀 **Próximas Funcionalidades**
+- [ ] Caché inteligente para optimizar consultas repetidas
+- [ ] Exportación a diferentes formatos (Excel, CSV, JSON)
+- [ ] Soporte para consultas estatales con IDs del ITAEE
+- [ ] Integración con más APIs gubernamentales mexicanas
+- [ ] Tests automatizados con IDs validados
 
 ---
 

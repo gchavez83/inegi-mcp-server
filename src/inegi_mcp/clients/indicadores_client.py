@@ -5,6 +5,8 @@ Versión definitiva — todos los fixes consolidados:
   2. Reintento automático BISE → BIE si el primer banco falla
   3. comparar_por_estados: código directo sin sufijos
   4. buscar_por_cl_indicator: URL correcta sin parámetros extra
+  5. buscar_catalogo_completo: endpoint correcto con metodoBusqueda=1 y orderby=RANKING
+  6. buscar_banco_indicadores_raw: método directo para la nueva herramienta del server
 """
 import httpx
 from typing import Dict, List, Optional, Any
@@ -150,32 +152,54 @@ class IndicadoresClient:
 
     async def buscar_catalogo_completo(self, busqueda: str, pagina_inicio: int = 0,
                                         pagina_fin: int = 20, area_geo: str = "00",
-                                        tematica: str = "", idioma: str = "es") -> Dict[str, Any]:
-        """Búsqueda en catálogo completo vía API web del INEGI (requiere cookies de sesión)."""
-        session_url = "https://www.inegi.org.mx/app/querybuilder2/default.html"
-        search_url  = "https://www.inegi.org.mx/app/api/buscadorcore/v1/busquedaBancoIndicadores/"
+                                        tematica: str = "", idioma: str = "es") -> List[Dict[str, Any]]:
+        """
+        Búsqueda semántica en el Banco de Indicadores del INEGI.
+        FIX v2: metodoBusqueda=1 y orderby=RANKING (capturado del DevTools del portal INEGI).
+        El valor anterior (metodoBusqueda=2, orderby=INDICADOR) no devolvía resultados
+        para búsquedas textuales como 'inflación' o 'producto interno bruto'.
+        """
+        search_url = "https://www.inegi.org.mx/app/api/buscadorcore/v1/busquedaBancoIndicadores/"
+
+        payload = {
+            "busqueda": busqueda,
+            "busquedaCiencia": "",
+            "paginaInicio": pagina_inicio,
+            "paginaFin": pagina_fin,
+            "areageo": area_geo,
+            "filtrobusqueda": "CBUSQUEDA",
+            "filtrotema": "null",
+            "herramienta": 405,
+            "idioma": idioma,
+            "metodoBusqueda": 1,
+            "orderby": "RANKING",
+            "orderbyAscDesc": "Desc",
+            "tematica": tematica if tematica else "6",
+            "IndPrincipales": "null",
+        }
+
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Accept-Language": "es-MX,es;q=0.9",
+        }
 
         async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS) as client:
-            await client.get(session_url, headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept-Language": "es-MX,es;q=0.9",
-            })
-            payload = {
-                "busqueda": busqueda, "busquedaCiencia": "",
-                "paginaInicio": pagina_inicio, "paginaFin": pagina_fin,
-                "areageo": area_geo, "filtrotema": "null",
-                "tematica": tematica if tematica else "6",
-                "filtrobusqueda": "CBUSQUEDA", "orderby": "INDICADOR",
-                "orderbyAscDesc": "Desc", "metodoBusqueda": 2,
-                "IndPrincipales": "null", "idioma": idioma, "herramienta": 405
-            }
-            response = await client.post(search_url, json=payload, headers={
-                "Accept": "application/json, text/javascript, */*; q=0.01",
-                "Content-Type": "application/json; charset=UTF-8",
-                "Origin": "https://www.inegi.org.mx",
-                "Referer": "https://www.inegi.org.mx/app/querybuilder2/default.html",
-                "X-Requested-With": "XMLHttpRequest",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            })
+            response = await client.post(search_url, json=payload, headers=headers)
             response.raise_for_status()
             return response.json()
+
+    async def buscar_banco_indicadores_raw(self, busqueda: str, pagina_inicio: int = 0,
+                                            pagina_fin: int = 20, area_geo: str = "00",
+                                            idioma: str = "es") -> List[Dict[str, Any]]:
+        """
+        Alias directo de buscar_catalogo_completo para uso interno.
+        Mismo endpoint y parámetros — expuesto para claridad semántica.
+        """
+        return await self.buscar_catalogo_completo(
+            busqueda=busqueda,
+            pagina_inicio=pagina_inicio,
+            pagina_fin=pagina_fin,
+            area_geo=area_geo,
+            idioma=idioma,
+        )

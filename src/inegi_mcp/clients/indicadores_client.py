@@ -7,6 +7,9 @@ Versión definitiva — todos los fixes consolidados:
   4. buscar_por_cl_indicator: URL correcta sin parámetros extra
   5. buscar_catalogo_completo: endpoint correcto con metodoBusqueda=1 y orderby=RANKING
   6. buscar_banco_indicadores_raw: método directo para la nueva herramienta del server
+  7. obtener_indicador: trata respuestas 200 con lista de error como banco incorrecto
+  8. obtener_catalogo_map / describir_codigo: decodifica UNIT y FREQ con caché
+  9. Buscadores: area_geo "null" por defecto (otros valores vacían el resultado)
 """
 import httpx
 from typing import Dict, List, Optional, Any
@@ -18,6 +21,10 @@ from ..config import (
 )
 
 
+class IndicadorNoDisponible(Exception):
+    """El indicador no respondió en ningún banco (BIE, BISE, BIE-BISE) para el área pedida."""
+
+
 class IndicadoresClient:
     """Cliente para interactuar con la API de Indicadores del INEGI"""
 
@@ -25,6 +32,7 @@ class IndicadoresClient:
         self.token = token or INEGI_INDICADORES_TOKEN
         self.base_url = INDICADORES_BASE_URL
         self.config = IndicadoresConfig()
+        self._catalogos: Dict[tuple, Dict[str, str]] = {}
         # No hacer raise aquí — el token puede llegar como env var del proceso
         # cuando Claude Desktop lanza el MCP. Se validará en cada llamada.
 
@@ -53,8 +61,11 @@ class IndicadoresClient:
         else:
             geo_final = area_geo  # ya es correcto: "31", "00", "04"
 
-        # Reintento BISE → BIE
-        last_error = None
+        # Reintento BIE → BISE → BIE-BISE.
+        # La API responde 400 cuando el banco no corresponde al indicador, y a veces
+        # responde 200 con una lista ["ErrorInfo:...", ...] en lugar de un dict.
+        # Ambos casos se tratan como "banco incorrecto" y se prueba el siguiente.
+        intentos = []
         for fuente in ("BIE", "BISE", "BIE-BISE"):
             url = self._construir_url(
                 metodo="INDICATOR", indicador_id=indicador_id,
@@ -66,12 +77,68 @@ class IndicadoresClient:
                     response = await client.get(url)
                     response.raise_for_status()
                     data = response.json()
-                    data["_banco"] = fuente
-                    return data
             except httpx.HTTPStatusError as e:
-                last_error = e
+                intentos.append(f"{fuente}: HTTP {e.response.status_code}")
                 continue
-        raise last_error
+            except ValueError:
+                intentos.append(f"{fuente}: respuesta no es JSON")
+                continue
+
+            if isinstance(data, dict) and data.get("Series"):
+                data["_banco"] = fuente
+                data["_geo"] = geo_final
+                return data
+
+            detalle = data[0] if isinstance(data, list) and data else "sin series"
+            intentos.append(f"{fuente}: {str(detalle)[:60]}")
+
+        raise IndicadorNoDisponible(
+            f"El indicador {indicador_id} no respondió en ningún banco para el área "
+            f"'{geo_final}' ({'; '.join(intentos)})."
+        )
+
+    async def obtener_catalogo_map(self, tipo_catalogo: str, idioma: str = "es") -> Dict[str, str]:
+        """
+        Devuelve {codigo: descripcion} para UNIT o FREQ, con caché en memoria.
+        El catálogo BISE es el más completo (223 unidades); BIE-BISE se une por si aporta
+        códigos adicionales. Si ambos fallan, devuelve {} y el llamador muestra el código crudo.
+        """
+        clave = (tipo_catalogo, idioma)
+        if clave in self._catalogos:
+            return self._catalogos[clave]
+
+        mapa: Dict[str, str] = {}
+        for banco in ("BISE", "BIE-BISE"):
+            url = (
+                f"{self.base_url}/CL_{tipo_catalogo}/null/{idioma}/"
+                f"{banco}/{self.config.VERSION}/{self.token}?type=json"
+            )
+            try:
+                async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS) as client:
+                    response = await client.get(url)
+                    response.raise_for_status()
+                    data = response.json()
+            except Exception:
+                continue
+            codigos = data.get("CODE", []) if isinstance(data, dict) else []
+            for c in codigos:
+                if not isinstance(c, dict):
+                    continue
+                valor = str(c.get("value", c.get("Value", ""))).strip()
+                desc = c.get("Description", c.get("description", ""))
+                if valor and desc and valor not in mapa:
+                    mapa[valor] = desc
+
+        if mapa:
+            self._catalogos[clave] = mapa
+        return mapa
+
+    async def describir_codigo(self, tipo_catalogo: str, codigo: Any, idioma: str = "es") -> str:
+        """'1051' -> 'Índice base 2018=100'. Si no se puede decodificar, regresa el código."""
+        if codigo in (None, ""):
+            return "N/D"
+        mapa = await self.obtener_catalogo_map(tipo_catalogo, idioma)
+        return mapa.get(str(codigo).strip(), str(codigo))
 
     async def obtener_catalogo(self, tipo_catalogo: str,
                                 id_catalogo: Optional[str] = None,
@@ -151,13 +218,15 @@ class IndicadoresClient:
         ]
 
     async def buscar_catalogo_completo(self, busqueda: str, pagina_inicio: int = 0,
-                                        pagina_fin: int = 20, area_geo: str = "00",
+                                        pagina_fin: int = 20, area_geo: str = "null",
                                         tematica: str = "", idioma: str = "es") -> List[Dict[str, Any]]:
         """
         Búsqueda semántica en el Banco de Indicadores del INEGI.
         FIX v2: metodoBusqueda=1 y orderby=RANKING (capturado del DevTools del portal INEGI).
         El valor anterior (metodoBusqueda=2, orderby=INDICADOR) no devolvía resultados
         para búsquedas textuales como 'inflación' o 'producto interno bruto'.
+        FIX v3: area_geo por defecto "null". Cualquier otro valor ("00", "31") hace que el
+        buscador regrese vacío aunque existan miles de resultados (verificado con 'turismo').
         """
         search_url = "https://www.inegi.org.mx/app/api/buscadorcore/v1/busquedaBancoIndicadores/"
 
@@ -190,7 +259,7 @@ class IndicadoresClient:
             return response.json()
 
     async def buscar_banco_indicadores_raw(self, busqueda: str, pagina_inicio: int = 0,
-                                            pagina_fin: int = 20, area_geo: str = "00",
+                                            pagina_fin: int = 20, area_geo: str = "null",
                                             idioma: str = "es") -> List[Dict[str, Any]]:
         """
         Alias directo de buscar_catalogo_completo para uso interno.

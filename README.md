@@ -216,9 +216,47 @@ obtener_indicador_inteligente(indicador_id="510104", codigo_geo="31")
 # → Detecta nivel nacional (desglose=1), retorna serie completa
 
 # 3. Para indicadores con cobertura estatal, intenta Yucatán automáticamente
-obtener_indicador_inteligente(indicador_id="6207061369", codigo_geo="31")
+obtener_indicador_inteligente(indicador_id="6207061373", codigo_geo="31")
 # → Si hay datos estatales los trae; si no, hace fallback a nacional
+#   (6207061373 = ITAEE actividades terciarias; 6207061369 es actividades primarias)
+
+# 4. Pedir un tramo concreto de la serie (las observaciones salen en orden cronológico
+#    y, si hay más de `limite`, se muestran las MÁS RECIENTES)
+obtener_indicador_inteligente(indicador_id="6207123163", codigo_geo="00", desde="2024", hasta="2025/12")
+obtener_serie_temporal(indicador_id="716074", desde="2025", limite=0)   # limite=0 = sin recorte
 ```
+
+### 🧭 **Series de turismo validadas (septiembre 2026)**
+| Serie | ID | Cobertura | Último dato | Nota |
+|---|---|---|---|---|
+| Ingresos hoteles 7211 (EMS) | `716074` | Nacional | 2026/06 | Índice base 2018=100 |
+| Personal ocupado hoteles 7211 (EMS) | `716218` | Nacional | 2026/06 | Índice base 2018=100 |
+| Ingresos sector 72 Yucatán (EMS) | `717592` | Estatal (31) | 2024/02 | Índice base 2018=100 |
+| Personal ocupado sector 72 Yucatán (EMS) | `717768` | Estatal (31) | 2024/02 | Índice base 2018=100 |
+| Turistas de internación vía aérea (EVI) | `6207123163` | Nacional | 2025/12 | Entradas |
+| Gasto turistas de internación vía aérea (EVI) | `6207123170` | Nacional | 2025/12 | Dólares |
+| Consumo turístico receptivo / interno (CSTM 2018) | `6207135895` / `6207135900` | Nacional | 2024 | Porcentaje |
+| ITAT índice / variación | `497685` / `497689` | Nacional | 2023/T1 | ⚠️ base 2013, serie cerrada |
+| PIBE sector 72 Yucatán | `489207` | Estatal | 2021 | ⚠️ base 2013, serie cerrada |
+| ITAEE terciarias Yucatán | `6207061373` | Estatal | 2023/T1 | ⚠️ base 2013, serie cerrada |
+
+Las series marcadas ⚠️ existen con base 2018 bajo otro ID que el buscador de la API no
+localiza; hay que tomarlo del Banco de Información Económica en el portal de INEGI.
+
+### 🛠️ **Correcciones de septiembre 2026**
+- `obtener_indicador_inteligente` ya no construye la URL a mano con el banco fijo `BIE-BISE`
+  (causa de los HTTP 400 en series económicas): usa el cliente y reintenta BIE → BISE → BIE-BISE.
+- Las observaciones se ordenan cronológicamente antes de recortar. Antes `obs[-80:]` tomaba
+  las 80 **más antiguas** porque INEGI entrega la serie de nueva a vieja.
+- Nuevos parámetros `desde`, `hasta` y `limite` en `obtener_serie_temporal` y
+  `obtener_indicador_inteligente`.
+- Unidades y frecuencias decodificadas con CL_UNIT / CL_FREQ (con caché) en lugar de códigos
+  numéricos (1051 → «Índice base 2018=100», 8 → «Mensual»).
+- Los metadatos del catálogo solo se usan si el INDICADOR coincide con el ID pedido.
+- Los buscadores usan `area_geo="null"` por defecto (cualquier otro valor vacía la respuesta) y
+  reintentan sin filtro cuando se pidió uno. Muestran la ruta temática completa y avisan cuando
+  una serie tiene base 2013 y su último dato es anterior a 2024.
+- `comparar_estados` toma el último dato real (ordenado), no el último de la lista.
 
 ### 📈 **Búsqueda de indicadores de precios / INPC**
 ```python

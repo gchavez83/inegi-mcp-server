@@ -2,11 +2,13 @@
 Servidor MCP principal para las APIs del INEGI usando FastMCP
 """
 import os
+import re
 import httpx
 from mcp.server.fastmcp import FastMCP
 from .clients import IndicadoresClient, DENUEClient
+from .clients.indicadores_client import IndicadorNoDisponible
 from .config import INDICADORES_COMUNES, DENUEConfig
-from typing import Optional
+from typing import Optional, List, Dict, Any, Tuple
 
 # Crear el servidor FastMCP
 mcp = FastMCP("inegi-mcp")
@@ -14,6 +16,127 @@ mcp = FastMCP("inegi-mcp")
 # Inicializar clientes
 indicadores_client = IndicadoresClient()
 denue_client = DENUEClient()
+
+
+# ============================================================================
+# UTILIDADES DE SERIES
+# ============================================================================
+# La API de INEGI entrega las observaciones de la más reciente a la más antigua.
+# Todo recorte "últimas N" debe ordenar primero; de lo contrario se descartan
+# justamente los datos nuevos (bug corregido en septiembre 2026).
+
+_LIMITE_DEFAULT = 80
+
+
+def _clave_periodo(periodo: str) -> Tuple[int, int]:
+    """
+    Convierte un TIME_PERIOD de INEGI en (año, subperiodo) ordenable.
+    Formatos vistos: '2025/12' (mes), '2023/01' (trimestre 1), '2021' (año),
+    '2025' en catálogos como '2025012' (año+mes sin separador) o '20253' (año+trimestre).
+    """
+    if periodo is None:
+        return (0, 0)
+    p = str(periodo).strip()
+    m = re.match(r"^(\d{4})\D+(\d{1,2})$", p)
+    if m:
+        return (int(m.group(1)), int(m.group(2)))
+    m = re.match(r"^(\d{4})(\d{1,3})$", p)
+    if m:
+        return (int(m.group(1)), int(m.group(2)))
+    m = re.match(r"^(\d{4})$", p)
+    if m:
+        return (int(m.group(1)), 0)
+    return (0, 0)
+
+
+def _ordenar_obs(obs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Orden cronológico ascendente por TIME_PERIOD."""
+    return sorted(obs, key=lambda o: _clave_periodo(o.get("TIME_PERIOD")))
+
+
+def _filtrar_periodo(obs: List[Dict[str, Any]], desde: Optional[str], hasta: Optional[str]):
+    """
+    Filtra por periodo. 'desde'/'hasta' aceptan '2018', '2018/01' o '2018-01'.
+    Un año solo se interpreta como inicio de año (desde) o fin de año (hasta).
+    """
+    def limite(v: Optional[str], es_fin: bool):
+        if not v:
+            return None
+        k = _clave_periodo(str(v).replace("-", "/"))
+        if k == (0, 0):
+            return None
+        if k[1] == 0:
+            return (k[0], 99 if es_fin else 0)
+        return k
+
+    lo = limite(desde, False)
+    hi = limite(hasta, True)
+    out = obs
+    if lo:
+        out = [o for o in out if _clave_periodo(o.get("TIME_PERIOD")) >= lo]
+    if hi:
+        out = [o for o in out if _clave_periodo(o.get("TIME_PERIOD")) <= hi]
+    return out
+
+
+def _fmt_valor(valor: Any) -> str:
+    try:
+        return f"{float(valor):,.4f}".rstrip("0").rstrip(".")
+    except (ValueError, TypeError):
+        return str(valor) if valor not in (None, "") else "N/D"
+
+
+def _aviso_base_cerrada(unidad_desc: str, ultimo_periodo: str) -> str:
+    """
+    Marca series con base de referencia antigua (2008, 2013) cuyo último periodo es
+    anterior a 2024: INEGI las dejó de actualizar al cambiar de año base y existe
+    una versión base 2018 con otro ID.
+    """
+    anio = _clave_periodo(ultimo_periodo)[0]
+    base_vieja = re.search(r"\b(2003|2008|2013)\b", unidad_desc or "")
+    if base_vieja and anio and anio < 2024:
+        return (f"\n> ⚠️ Serie con base {base_vieja.group(1)} y último dato en {ultimo_periodo}. "
+                f"INEGI ya no la actualiza; busca la versión base 2018 del mismo indicador (ID distinto).")
+    return ""
+
+
+async def _describir_serie(serie: Dict[str, Any]) -> Tuple[str, str]:
+    """Devuelve (unidad legible, frecuencia legible) a partir de los códigos UNIT/FREQ."""
+    unidad = await indicadores_client.describir_codigo("UNIT", serie.get("UNIT"))
+    frecuencia = await indicadores_client.describir_codigo("FREQ", serie.get("FREQ"))
+    return unidad, frecuencia
+
+
+def _render_observaciones(obs: List[Dict[str, Any]], limite: int, desde: Optional[str],
+                          hasta: Optional[str], tabla: bool = False) -> str:
+    """Ordena, filtra y recorta a las últimas `limite` observaciones; indica el rango real."""
+    total = len(obs)
+    ordenadas = _filtrar_periodo(_ordenar_obs(obs), desde, hasta)
+    filtradas = len(ordenadas)
+    recorte = ordenadas[-limite:] if limite and len(ordenadas) > limite else ordenadas
+
+    if not recorte:
+        return "\n_Sin observaciones en el rango solicitado._\n"
+
+    rango_total = f"{ordenadas[0].get('TIME_PERIOD')} → {ordenadas[-1].get('TIME_PERIOD')}"
+    partes = [f"**Observaciones:** {total} publicadas"]
+    if desde or hasta:
+        partes.append(f"{filtradas} en el rango pedido")
+    partes.append(f"mostrando {len(recorte)} ({recorte[0].get('TIME_PERIOD')} → {recorte[-1].get('TIME_PERIOD')})")
+    texto = f"**Periodo disponible:** {rango_total}\n" + " · ".join(partes) + "\n\n"
+
+    if tabla:
+        texto += "| Período | Valor |\n|---------|-------|\n"
+        for o in recorte:
+            texto += f"| {o.get('TIME_PERIOD', 'N/A')} | {_fmt_valor(o.get('OBS_VALUE'))} |\n"
+    else:
+        for o in recorte:
+            texto += f"- {o.get('TIME_PERIOD', 'N/A')}: {_fmt_valor(o.get('OBS_VALUE'))}\n"
+
+    if len(ordenadas) > len(recorte):
+        texto += (f"\n_Se omitieron {len(ordenadas) - len(recorte)} observaciones anteriores. "
+                  f"Usa `desde`/`hasta` o sube `limite` para verlas._")
+    return texto
 
 
 # ============================================================================
@@ -85,10 +208,16 @@ async def obtener_serie_temporal(
     area_geografica: str = "00",
     codigo_geo: Optional[str] = None,
     historica: bool = True,
-    idioma: str = "es"
+    idioma: str = "es",
+    desde: Optional[str] = None,
+    hasta: Optional[str] = None,
+    limite: int = _LIMITE_DEFAULT,
 ) -> str:
     """
     Obtiene datos de un indicador económico o demográfico del INEGI.
+
+    Las observaciones se devuelven en orden cronológico y, si hay más de `limite`,
+    se muestran las MÁS RECIENTES. Usa `desde`/`hasta` para pedir un tramo concreto.
 
     Args:
         indicador_id: ID del indicador (ej: '1002000001' para población)
@@ -96,36 +225,40 @@ async def obtener_serie_temporal(
         codigo_geo: Código de estado/municipio (ej: '31' para Yucatán)
         historica: true para serie completa, false para último dato
         idioma: Idioma: 'es' o 'en'
+        desde: Periodo inicial, ej. '2018' o '2018/01' (opcional)
+        hasta: Periodo final, ej. '2025' o '2025/12' (opcional)
+        limite: Máximo de observaciones a mostrar (default 80; 0 = sin límite)
     """
     try:
         data = await indicadores_client.obtener_indicador(
             indicador_id=indicador_id, area_geo=area_geografica,
             codigo_geo=codigo_geo, historica=historica, idioma=idioma
         )
-
-        if "Series" in data and len(data["Series"]) > 0:
-            serie = data["Series"][0]
-            nombre_indicador = INDICADORES_COMUNES.get(indicador_id, f"Indicador {indicador_id}")
-            texto = f"## {nombre_indicador}\n\n"
-            texto += f"**Unidad:** {serie.get('UNIT', 'N/A')}\n"
-            texto += f"**Frecuencia:** {serie.get('FREQ', 'N/A')}\n"
-            texto += f"**Última actualización:** {serie.get('LASTUPDATE', 'N/A')}\n\n"
-
-            if "OBSERVATIONS" in serie:
-                obs = serie["OBSERVATIONS"]
-                texto += f"**Datos ({len(obs)} observaciones):**\n\n"
-                LIMITE = 80
-                ultimas = obs[-LIMITE:] if len(obs) > LIMITE else obs
-                for o in ultimas:
-                    texto += f"- {o.get('TIME_PERIOD', 'N/A')}: {o.get('OBS_VALUE', 'N/A')}\n"
-                if len(obs) > LIMITE:
-                    texto += f"\n_(Mostrando las últimas {LIMITE} de {len(obs)} observaciones)_"
-            return texto
-        else:
-            return f"No se encontraron datos para el indicador {indicador_id}"
-
+    except IndicadorNoDisponible as e:
+        return f"No se encontraron datos para el indicador {indicador_id}.\n\n{e}"
     except Exception as e:
         return f"Error al obtener el indicador: {str(e)}"
+
+    serie = data["Series"][0]
+    nombre_indicador = INDICADORES_COMUNES.get(indicador_id, f"Indicador {indicador_id}")
+    unidad, frecuencia = await _describir_serie(serie)
+    geo = data.get("_geo", area_geografica)
+    geo_desc = "Nacional" if geo == "00" else DENUEConfig.ENTIDADES.get(str(geo).zfill(2), f"Área {geo}")
+
+    texto = f"## {nombre_indicador}\n\n"
+    texto += f"**ID:** `{indicador_id}` · **Banco:** {data.get('_banco', 'N/D')} · **Ámbito:** {geo_desc}\n"
+    texto += f"**Unidad:** {unidad}\n"
+    texto += f"**Frecuencia:** {frecuencia}\n"
+    texto += f"**Última actualización INEGI:** {serie.get('LASTUPDATE', 'N/A')}\n"
+
+    obs = serie.get("OBSERVATIONS", []) or []
+    if not obs:
+        return texto + "\n_La serie no trae observaciones._"
+
+    ultimo = _ordenar_obs(obs)[-1].get("TIME_PERIOD", "")
+    texto += _aviso_base_cerrada(unidad, ultimo)
+    texto += "\n" + _render_observaciones(obs, limite, desde, hasta)
+    return texto
 
 
 @mcp.tool()
@@ -202,10 +335,10 @@ async def comparar_estados(indicador_id: str, estados: list[str], historica: boo
                 texto += f"❌ Error: {data['error']}\n\n"
             elif "Series" in data and data["Series"]:
                 serie = data["Series"][0]
-                obs = serie.get("OBSERVATIONS", [])
+                obs = _ordenar_obs(serie.get("OBSERVATIONS", []) or [])
                 if obs:
-                    ultima = obs[-1]
-                    texto += f"**Último dato:** {ultima.get('OBS_VALUE', 'N/A')} ({ultima.get('TIME_PERIOD', 'N/A')})\n\n"
+                    ultima = obs[-1]  # ya ordenado: el más reciente
+                    texto += f"**Último dato:** {_fmt_valor(ultima.get('OBS_VALUE'))} ({ultima.get('TIME_PERIOD', 'N/A')})\n\n"
                 else:
                     texto += "Sin datos disponibles\n\n"
             else:
@@ -220,56 +353,40 @@ async def comparar_estados(indicador_id: str, estados: list[str], historica: boo
 @mcp.tool()
 async def buscar_catalogo_completo(
     busqueda: str, limite: int = 20, pagina: int = 0,
-    area_geo: str = "00", tematica: str = ""
+    area_geo: str = "null", tematica: str = ""
 ) -> str:
     """
     Busca indicadores en el catálogo COMPLETO del INEGI (miles de indicadores).
+
+    Nota: el buscador de INEGI solo responde con area_geo="null". Si se pasa otro
+    valor y no hay resultados, se reintenta sin filtro y se avisa. Para saber si un
+    indicador tiene desglose estatal, revisa la "Cobertura" de cada resultado.
 
     Args:
         busqueda: Término de búsqueda (ej: 'PIB', 'IGAE', 'exportaciones', 'matrimonios')
         limite: Número máximo de resultados (default: 20, máx: 100)
         pagina: Página de resultados para paginación (default: 0)
-        area_geo: Área geográfica ("00"=nacional)
+        area_geo: Dejar en "null" (ver nota)
         tematica: Código de temática específica (opcional)
     """
     try:
-        data = await indicadores_client.buscar_catalogo_completo(
-            busqueda=busqueda, pagina_inicio=pagina * limite,
-            pagina_fin=(pagina * limite) + limite, area_geo=area_geo, tematica=tematica
-        )
+        data, aviso = await _buscar_con_fallback_geo(
+            busqueda, pagina * limite, (pagina * limite) + limite, area_geo, tematica)
 
-        if not data or not isinstance(data, list) or len(data) == 0:
-            return f"No se encontraron indicadores con el término '{busqueda}'"
+        if not data:
+            return (f"No se encontraron indicadores con el término '{busqueda}'.\n\n"
+                    f"Sugerencias: prueba una sola palabra clave (ej. 'hoteles', 'turismo', "
+                    f"'alojamiento temporal') o usa `buscar_banco_indicadores`.")
 
-        total = len(data)
+        total = data[0].get("TOTAL", len(data)) if isinstance(data[0], dict) else len(data)
         texto = f"## Catálogo Completo: '{busqueda}'\n\n"
-        texto += f"**Total encontrados:** {total} | **Mostrando:** {min(total, limite)}\n\n"
+        texto += f"**Total encontrados:** {total} | **Mostrando:** {min(len(data), limite)}\n"
+        if aviso:
+            texto += aviso + "\n"
+        texto += "\n"
 
         for i, item in enumerate(data[:limite], 1):
-            titulo = item.get("TITULO", "Sin título")
-            codigo = item.get("INDICADOR", "N/A")
-            tematica_desc = item.get("TEMATICA", "").replace("Banco de Indicadores > ", "")
-            partes = tematica_desc.split(" > ")
-            cat = " > ".join(partes[:3]) + ("..." if len(partes) > 3 else "")
-            unidad = item.get("UNIDAD_MEDIDA", "")
-            frecuencia = item.get("FRECUENCIA_DESCRIPCION", "")
-            periodos = item.get("PERIODOS", "")
-            fuente = item.get("FUENTE_DESCRIPCION", "")
-
-            texto += f"### {i}. {titulo}\n"
-            texto += f"**ID:** `{codigo}`\n"
-            if cat:
-                texto += f"**Categoría:** {cat}\n"
-            if unidad:
-                texto += f"**Unidad:** {unidad}\n"
-            if frecuencia:
-                texto += f"**Frecuencia:** {frecuencia}\n"
-            if periodos:
-                pl = periodos.split(", ")
-                texto += f"**Períodos:** {', '.join(pl[:5])}{'...' if len(pl) > 5 else ''}\n"
-            if fuente and len(fuente) < 100:
-                texto += f"**Fuente:** {fuente}\n"
-            texto += f"💡 `obtener_indicador_inteligente(indicador_id='{codigo}')`\n\n"
+            texto += _render_item_catalogo(item, numero=i)
 
         return texto
 
@@ -471,106 +588,50 @@ async def buscar_banco_indicadores(
     limite: int = 20,
 ) -> str:
     """
-    Busca indicadores en el Banco de Indicadores del INEGI (BIE).
+    Busca indicadores en el Banco de Indicadores del INEGI (BIE + BISE).
     Usa búsqueda semántica por ranking — el mismo endpoint que el portal web del INEGI.
 
-    Términos que funcionan (validados): PIB, IGAE, exportaciones, balanza,
-    precios consumidor, indice precios, ocupacion, salario, industria, crecimiento.
-
-    Términos que NO funcionan directamente: 'inflacion', 'INPC' — en ese caso
-    usar 'precios consumidor' o 'indice precios'.
+    Consejos:
+    - Funciona mejor con una o dos palabras ('turismo', 'hoteles', 'alojamiento temporal',
+      'visitantes internacionales', 'PIB', 'IGAE', 'precios consumidor').
+    - Los acentos no afectan la búsqueda.
+    - El filtro geográfico del buscador de INEGI vacía los resultados; se ignora y la
+      cobertura real (Nacional/Estatal/Municipal) se muestra en cada resultado.
+    - Un mismo título puede aparecer varias veces con IDs distintos: son valoraciones
+      diferentes (precios corrientes, precios 2013, índice). Distínguelos por Unidad y Categoría.
 
     Args:
-        busqueda: Término de búsqueda exacto en español
-        area_geo: Área geográfica ('null'=todas, '31'=Yucatán)
+        busqueda: Término de búsqueda en español
+        area_geo: Dejar en 'null' (ver consejos)
         pagina: Página de resultados (default: 0)
         limite: Resultados por página (default: 20)
     """
-    url = "https://www.inegi.org.mx/app/api/buscadorcore/v1/busquedaBancoIndicadores/"
-
-    payload = {
-        "busqueda": busqueda,
-        "busquedaCiencia": "",
-        "paginaInicio": pagina * limite,
-        "paginaFin": (pagina * limite) + limite,
-        "areageo": area_geo,
-        "filtrobusqueda": "CBUSQUEDA",
-        "filtrotema": "null",
-        "herramienta": 405,
-        "idioma": "es",
-        "metodoBusqueda": 1,
-        "orderby": "RANKING",
-        "orderbyAscDesc": "Desc",
-        "tematica": "6",
-        "IndPrincipales": "null",
-    }
-
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Accept-Language": "es-MX,es;q=0.9",
-    }
-
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(url, json=payload, headers=headers)
-            response.raise_for_status()
-            data = response.json()
+        data, aviso = await _buscar_con_fallback_geo(
+            busqueda, pagina * limite, (pagina * limite) + limite, area_geo, "")
 
         if not data:
             return (
-                f"Sin resultados para '{busqueda}'.\n\n"
-                f"**Términos validados que sí funcionan:**\n"
-                f"- Económicos: `PIB`, `IGAE`, `exportaciones`, `balanza`, `crecimiento`\n"
-                f"- Precios: `precios consumidor`, `indice precios`\n"
-                f"- Empleo: `ocupacion`, `salario`\n"
-                f"- Sector: `industria`, `agricultura`, `comercio`\n"
+                f"Sin resultados para '{busqueda}' en el Banco de Indicadores de INEGI.\n\n"
+                f"Puede que INEGI no publique ese indicador (por ejemplo, la ocupación hotelera "
+                f"la publica SECTUR/DataTur, no INEGI). Prueba con una sola palabra clave o un "
+                f"sinónimo: 'hoteles', 'alojamiento temporal', 'turismo', 'visitantes internacionales'."
             )
 
         total = data[0].get("TOTAL", len(data)) if data else 0
         pagina_actual = pagina + 1
-        paginas_total = -(-total // limite)
+        paginas_total = max(1, -(-total // limite))
 
         lines = [
             f"## Banco de Indicadores INEGI: '{busqueda}'",
             f"**Total:** {total} | **Página:** {pagina_actual}/{paginas_total}",
-            "",
         ]
+        if aviso:
+            lines.append(aviso)
+        lines.append("")
 
         for item in data:
-            ind_id     = item.get("INDICADOR", "")
-            titulo     = item.get("TITULO", "")
-            tematica   = item.get("TEMATICA", "")
-            unidad     = item.get("UNIDAD_MEDIDA", "")
-            frecuencia = item.get("FRECUENCIA_DESCRIPCION", "")
-            periodos   = item.get("PERIODOS", "")
-            desglose   = int(item.get("MAXIMODESGLOSEGEOGRAFICO", 1))
-            fuente     = item.get("FUENTE_DESCRIPCION", "")
-
-            nivel_geo = {1: "Nacional", 2: "Estatal", 3: "Municipal"}.get(desglose, "Nacional")
-
-            if periodos:
-                pl = [p.strip() for p in periodos.split(",")]
-                rango = f"{pl[-1]} - {pl[0]}" if len(pl) > 1 else pl[0]
-            else:
-                rango = "N/D"
-
-            if tematica:
-                partes = tematica.split(">")
-                categoria = " > ".join(p.strip() for p in partes[-3:])
-            else:
-                categoria = ""
-
-            lines.append(f"### {titulo}")
-            lines.append(f"**ID:** `{ind_id}`")
-            if categoria:
-                lines.append(f"**Categoría:** {categoria}")
-            lines.append(f"**Unidad:** {unidad} | **Frecuencia:** {frecuencia} | **Cobertura:** {nivel_geo}")
-            lines.append(f"**Períodos:** {rango}")
-            if fuente:
-                lines.append(f"**Fuente:** {fuente}")
-            lines.append(f"💡 `obtener_indicador_inteligente(indicador_id='{ind_id}')`")
-            lines.append("")
+            lines.append(_render_item_catalogo(item))
 
         if total > (pagina + 1) * limite:
             lines.append(f"_Más resultados disponibles. Usa `pagina={pagina + 1}`._")
@@ -583,145 +644,183 @@ async def buscar_banco_indicadores(
         return f"Error inesperado: {e}"
 
 
+async def _buscar_con_fallback_geo(busqueda: str, inicio: int, fin: int, area_geo: str,
+                                   tematica: str) -> Tuple[List[Dict[str, Any]], str]:
+    """
+    Llama al buscador de INEGI. Si se pidió un filtro geográfico distinto de 'null' y
+    no hubo resultados, reintenta sin filtro (el buscador vacía la respuesta con
+    cualquier área) y devuelve un aviso para el usuario.
+    """
+    data = await indicadores_client.buscar_catalogo_completo(
+        busqueda=busqueda, pagina_inicio=inicio, pagina_fin=fin,
+        area_geo=area_geo or "null", tematica=tematica)
+    aviso = ""
+    if (not data or not isinstance(data, list)) and (area_geo or "null") != "null":
+        data = await indicadores_client.buscar_catalogo_completo(
+            busqueda=busqueda, pagina_inicio=inicio, pagina_fin=fin,
+            area_geo="null", tematica=tematica)
+        if data:
+            aviso = (f"_El filtro geográfico '{area_geo}' no devuelve resultados en el buscador de INEGI; "
+                     f"se muestran todos. Revisa la Cobertura de cada indicador._")
+    if not isinstance(data, list):
+        data = []
+    return data, aviso
+
+
+def _render_item_catalogo(item: Dict[str, Any], numero: Optional[int] = None) -> str:
+    """Formato común para resultados del buscador, con ruta temática completa y aviso de base cerrada."""
+    ind_id     = item.get("INDICADOR", "")
+    titulo     = item.get("TITULO", "Sin título")
+    tematica   = (item.get("TEMATICA", "") or "").replace("Banco de Indicadores > ", "")
+    unidad     = item.get("UNIDAD_MEDIDA", "") or ""
+    frecuencia = item.get("FRECUENCIA_DESCRIPCION", "") or ""
+    periodos   = item.get("PERIODOS", "") or ""
+    fuente     = item.get("FUENTE_DESCRIPCION", "") or ""
+    try:
+        desglose = int(item.get("MAXIMODESGLOSEGEOGRAFICO", 1))
+    except (TypeError, ValueError):
+        desglose = 1
+    nivel_geo = {1: "Nacional", 2: "Estatal", 3: "Municipal"}.get(desglose, "Nacional")
+
+    ultimo = ""
+    if periodos:
+        pl = sorted((p.strip() for p in periodos.split(",") if p.strip()), key=_clave_periodo)
+        rango = f"{pl[0]} - {pl[-1]}" if len(pl) > 1 else pl[0]
+        ultimo = pl[-1]
+    else:
+        rango = "N/D"
+
+    encabezado = f"### {numero}. {titulo}" if numero else f"### {titulo}"
+    lines = [encabezado, f"**ID:** `{ind_id}`"]
+    if tematica:
+        lines.append(f"**Categoría:** {' > '.join(p.strip() for p in tematica.split('>'))}")
+    lines.append(f"**Unidad:** {unidad or 'N/D'} | **Frecuencia:** {frecuencia or 'N/D'} | **Cobertura:** {nivel_geo}")
+    lines.append(f"**Períodos:** {rango}")
+    if fuente:
+        lines.append(f"**Fuente:** {fuente}")
+    aviso = _aviso_base_cerrada(unidad + " " + fuente, ultimo)
+    if aviso:
+        lines.append(aviso.strip())
+    geo_hint = "codigo_geo='31'" if desglose >= 2 else "codigo_geo='00'"
+    lines.append(f"💡 `obtener_indicador_inteligente(indicador_id='{ind_id}', {geo_hint})`")
+    lines.append("")
+    return "\n".join(lines)
+
+
 @mcp.tool()
 async def obtener_indicador_inteligente(
     indicador_id: str,
     codigo_geo: str = "31",
     historica: bool = True,
+    desde: Optional[str] = None,
+    hasta: Optional[str] = None,
+    limite: int = _LIMITE_DEFAULT,
 ) -> str:
     """
     Versión inteligente de obtener_serie_temporal.
-    Detecta automáticamente el nivel geográfico del indicador y hace fallback
-    a nacional si el nivel estatal no está disponible.
+    Detecta el nivel geográfico del indicador (metadatos del Banco de Indicadores),
+    consulta la serie probando los tres bancos (BIE, BISE, BIE-BISE) y hace fallback
+    a nacional si el nivel estatal no está disponible. Unidades y frecuencias se
+    devuelven decodificadas; las observaciones, en orden cronológico y priorizando
+    las más recientes.
 
     Args:
         indicador_id: ID del indicador (obtenido de buscar_banco_indicadores)
-        codigo_geo: Código de estado (default: '31'=Yucatán)
+        codigo_geo: Código de estado (default: '31'=Yucatán; '00'=nacional)
         historica: True=serie completa, False=último dato
+        desde: Periodo inicial, ej. '2018' o '2018/01' (opcional)
+        hasta: Periodo final, ej. '2025' o '2025/12' (opcional)
+        limite: Máximo de observaciones a mostrar (default 80; 0 = sin límite)
     """
-    token = os.getenv("INEGI_INDICADORES_TOKEN", "")
-    if not token:
+    if not (indicadores_client.token or os.getenv("INEGI_INDICADORES_TOKEN", "")):
         return "Error: INEGI_INDICADORES_TOKEN no encontrado en variables de entorno."
 
-    meta_url = "https://www.inegi.org.mx/app/api/buscadorcore/v1/busquedaBancoIndicadores/"
-    payload = {
-        "busqueda": indicador_id, "busquedaCiencia": "", "paginaInicio": 0, "paginaFin": 5,
-        "areageo": "null", "filtrobusqueda": "CBUSQUEDA", "filtrotema": "null",
-        "herramienta": 405, "idioma": "es", "metodoBusqueda": 1,
-        "orderby": "RANKING", "orderbyAscDesc": "Desc", "tematica": "6", "IndPrincipales": "null",
-    }
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Accept-Language": "es-MX,es;q=0.9",
-    }
-
-    titulo = indicador_id
-    unidad = frecuencia = tematica = periodos = ""
-    desglose = 1
-
+    # 1) Metadatos del Banco de Indicadores. Solo se aceptan si el INDICADOR coincide
+    #    con el ID pedido; antes se tomaba el primer resultado y se mezclaban títulos.
+    meta: Dict[str, Any] = {}
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            meta_resp = await client.post(meta_url, json=payload, headers=headers)
-            meta_resp.raise_for_status()
-            meta_data = meta_resp.json()
-
-        meta = next(
-            (item for item in meta_data if str(item.get("INDICADOR", "")) == str(indicador_id)),
-            meta_data[0] if meta_data else None,
-        )
-        if meta:
-            titulo     = meta.get("TITULO", indicador_id)
-            unidad     = meta.get("UNIDAD_MEDIDA", "")
-            frecuencia = meta.get("FRECUENCIA_DESCRIPCION", "")
-            tematica   = meta.get("TEMATICA", "")
-            periodos   = meta.get("PERIODOS", "")
-            desglose   = int(meta.get("MAXIMODESGLOSEGEOGRAFICO", 1))
+        candidatos = await indicadores_client.buscar_catalogo_completo(
+            busqueda=str(indicador_id), pagina_inicio=0, pagina_fin=5, area_geo="null")
+        if isinstance(candidatos, list):
+            meta = next((c for c in candidatos
+                         if str(c.get("INDICADOR", "")).strip() == str(indicador_id).strip()), {}) or {}
     except Exception:
-        titulo = f"Indicador {indicador_id}"
+        meta = {}
 
+    titulo = meta.get("TITULO") or INDICADORES_COMUNES.get(indicador_id, f"Indicador {indicador_id}")
+    tematica = (meta.get("TEMATICA", "") or "").replace("Banco de Indicadores > ", "")
+    fuente = meta.get("FUENTE_DESCRIPCION", "") or ""
+    try:
+        desglose = int(meta.get("MAXIMODESGLOSEGEOGRAFICO", 1))
+    except (TypeError, ValueError):
+        desglose = 1
     nivel_geo_desc = {1: "Nacional", 2: "Estatal", 3: "Municipal"}
-    usar_estatal = desglose >= 2
-    geo_part = codigo_geo if usar_estatal else "00"
-    nivel_usado = f"Estatal ({codigo_geo})" if usar_estatal else "Nacional (único nivel disponible)"
 
-    historica_api = "false" if historica else "true"
-    base_api = "https://www.inegi.org.mx/app/api/indicadores/desarrolladores/jsonxml/INDICATOR"
+    # 2) Nivel geográfico a intentar
+    codigo_geo = (codigo_geo or "00").zfill(2)
+    pedir_estatal = codigo_geo != "00" and (desglose >= 2 or not meta)
+    geo_inicial = codigo_geo if pedir_estatal else "00"
 
-    def build_url(geo):
-        return f"{base_api}/{indicador_id}/es/{geo}/{historica_api}/BIE-BISE/2.0/{token}?type=json"
-
+    # 3) Serie con reintento de bancos y fallback estatal → nacional
+    data = None
     fallback_aplicado = False
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(build_url(geo_part))
+    errores: List[str] = []
+    for geo in ([geo_inicial, "00"] if geo_inicial != "00" else ["00"]):
+        try:
+            data = await indicadores_client.obtener_indicador(
+                indicador_id=indicador_id, area_geo=geo, historica=historica)
+            if geo != geo_inicial:
+                fallback_aplicado = True
+            break
+        except IndicadorNoDisponible as e:
+            errores.append(str(e))
+        except Exception as e:
+            errores.append(f"Error de conexión: {e}")
 
-        if resp.status_code == 400 and usar_estatal:
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(build_url("00"))
-            nivel_usado = "Nacional (fallback — datos estatales no disponibles)"
-            fallback_aplicado = True
+    if data is None:
+        intentados = "Estatal y nacional" if geo_inicial != "00" else "Nacional"
+        return (f"## {titulo} — `{indicador_id}`\n\n"
+                f"No fue posible obtener la serie.\n"
+                f"**Niveles intentados:** {intentados}"
+                f" · **Desglose declarado en catálogo:** {nivel_geo_desc.get(desglose, 'N/D') if meta else 'sin metadatos'}\n"
+                + "\n".join(f"- {e}" for e in errores)
+                + "\n\nVerifica el ID con `buscar_banco_indicadores`.")
 
-        resp.raise_for_status()
-        data_json = resp.json()
+    serie = data["Series"][0]
+    unidad, frecuencia = await _describir_serie(serie)
+    geo_usado = data.get("_geo", geo_inicial)
+    if geo_usado == "00":
+        nivel_usado = "Nacional" + (" (fallback: sin datos estatales)" if fallback_aplicado
+                                    else "" if pedir_estatal else " (único nivel disponible)")
+    else:
+        nivel_usado = f"Estatal · {DENUEConfig.ENTIDADES.get(geo_usado, geo_usado)} ({geo_usado})"
 
-    except httpx.HTTPStatusError as e:
-        return (
-            f"## {titulo} — `{indicador_id}`\n\n"
-            f"Error HTTP {e.response.status_code}\n"
-            f"**Nivel intentado:** {nivel_usado}\n"
-            f"**Desglose declarado:** {nivel_geo_desc.get(desglose, str(desglose))}"
-        )
-    except Exception as e:
-        return f"Error de conexión: {e}"
+    obs = serie.get("OBSERVATIONS", []) or []
+    lines = [f"## {titulo}", f"**ID:** `{indicador_id}` · **Banco:** {data.get('_banco', 'N/D')}"]
+    if tematica:
+        lines.append(f"**Categoría:** {' > '.join(p.strip() for p in tematica.split('>'))}")
+    lines.append(f"**Unidad:** {unidad} | **Frecuencia:** {frecuencia}")
+    if meta.get("UNIDAD_MEDIDA") and meta["UNIDAD_MEDIDA"].strip().lower() != unidad.strip().lower():
+        lines.append(f"> ℹ️ El catálogo describe la unidad como «{meta['UNIDAD_MEDIDA']}», "
+                     f"pero la serie reporta «{unidad}». Prevalece la serie.")
+    lines.append(f"**Nivel geográfico:** {nivel_usado}")
+    if fuente:
+        lines.append(f"**Fuente:** {fuente}")
+    lines.append(f"**Última actualización INEGI:** {serie.get('LASTUPDATE', 'N/A')}")
+    if fallback_aplicado:
+        lines.append("\n> ⚠️ Se solicitaron datos estatales pero la API solo sirve nivel nacional.")
 
-    try:
-        series = data_json.get("Series", [])
-        if not series:
-            return f"## {titulo}\n\nLa API respondió pero no contiene series de datos."
-
-        obs_list = series[0].get("OBSERVATIONS", [])
-        if not historica:
-            obs_list = obs_list[:1]
-
-        if periodos:
-            p = [x.strip() for x in periodos.split(",")]
-            rango_periodos = f"{p[-1]} - {p[0]}"
-        else:
-            rango_periodos = "N/D"
-
-        if tematica:
-            partes = tematica.split(">")
-            categoria = " > ".join(p.strip() for p in partes[-3:])
-        else:
-            categoria = ""
-
-        lines = [f"## {titulo}", f"**ID:** `{indicador_id}`"]
-        if categoria:
-            lines.append(f"**Categoría:** {categoria}")
-        lines += [
-            f"**Unidad:** {unidad} | **Frecuencia:** {frecuencia}",
-            f"**Nivel geográfico:** {nivel_usado}",
-            f"**Períodos publicados:** {rango_periodos}",
-            f"**Observaciones recuperadas:** {len(obs_list)}",
-        ]
-        if fallback_aplicado:
-            lines.append("\n> ⚠️ Se solicitaron datos estatales pero la API solo sirve nivel nacional.")
-
-        lines += ["", "| Período | Valor |", "|---------|-------|"]
-        for obs in obs_list:
-            periodo = obs.get("TIME_PERIOD", "")
-            valor = obs.get("OBS_VALUE", "")
-            try:
-                valor_fmt = f"{float(valor):,.4f}".rstrip("0").rstrip(".")
-            except (ValueError, TypeError):
-                valor_fmt = valor or "N/D"
-            lines.append(f"| {periodo} | {valor_fmt} |")
-
+    if not obs:
+        lines.append("\n_La API respondió pero la serie no trae observaciones._")
         return "\n".join(lines)
 
-    except Exception as e:
-        return f"## {titulo}\nError al parsear respuesta: {e}"
+    ultimo = _ordenar_obs(obs)[-1].get("TIME_PERIOD", "")
+    aviso = _aviso_base_cerrada(unidad + " " + fuente, ultimo)
+    if aviso:
+        lines.append(aviso.strip())
+    lines.append("")
+    lines.append(_render_observaciones(obs, limite, desde, hasta, tabla=True))
+    return "\n".join(lines)
 
 
 def main():
